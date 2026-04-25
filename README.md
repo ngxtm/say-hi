@@ -86,6 +86,66 @@ Preview the built app locally:
 npm run preview
 ```
 
+## Deployment
+
+This project is a static frontend application, so the recommended production setup is a Docker multi-stage build that compiles the app with Node.js and serves the final `dist/` output through Nginx.
+
+### Dokploy Deployment
+
+Recommended target:
+
+- Platform: Dokploy
+- Source: GitHub repository
+- Build type: `Dockerfile`
+- Runtime server: Nginx
+- Domain: `sayhi.ngxtm.site`
+
+### Required Files
+
+This repository includes the following deployment files:
+
+- `Dockerfile`
+- `.dockerignore`
+- `nginx.conf`
+
+### Dokploy Setup Steps
+
+1. Create a new application in Dokploy.
+2. Connect the application to your GitHub repository.
+3. Select the branch you want to deploy.
+4. Choose `Dockerfile` as the build method.
+5. Use the repository root as the build context.
+6. Set the Dockerfile path to `./Dockerfile`.
+7. Set the internal application port to `80`.
+8. Attach the domain `sayhi.ngxtm.site`.
+9. Enable SSL / Let's Encrypt.
+10. Run the first deployment manually, then enable auto deploy if the result is stable.
+
+### DNS
+
+Create an `A` record for `sayhi.ngxtm.site` that points to your VPS public IP.
+
+If you use Cloudflare, it is usually safer to start in DNS-only mode for the initial verification, then enable proxying later if needed.
+
+### Important Production Notes
+
+- Camera access requires `HTTPS` in production. If the site is served over plain HTTP, most browsers will block webcam access.
+- The app loads MediaPipe runtime and model assets from external URLs.
+- Client browsers must be able to access:
+  - `https://cdn.jsdelivr.net`
+  - `https://storage.googleapis.com`
+
+### Post-Deploy Checklist
+
+After deployment, verify the following on `https://sayhi.ngxtm.site`:
+
+1. The page loads without missing CSS or JavaScript files.
+2. The browser prompts for camera access.
+3. MediaPipe initializes successfully.
+4. Hand detection works in real time.
+5. Freeze, delayed capture, preview, and download all work as expected.
+6. The browser console does not show mixed-content, asset loading, or camera permission errors.
+
 ## Available Scripts
 
 Defined in `package.json`:
@@ -115,6 +175,8 @@ Defined in `package.json`:
 ├─ package.json
 ├─ package-lock.json
 ├─ tsconfig.json
+├─ Dockerfile
+├─ nginx.conf
 ├─ src/
 │  ├─ main.ts
 │  └─ style.css
