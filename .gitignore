@@ -1,5 +1,9 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+dist-*/
 
 # Logs
 *.log
@@ -13,6 +17,10 @@ pnpm-debug.log*
 .env.*
 !.env.example
 
+# TypeScript and Vite caches
+*.tsbuildinfo
+.vite/
+
 # Editor and OS files
 .vscode/
 .idea/
@@ -20,7 +28,3 @@ pnpm-debug.log*
 *.swo
 .DS_Store
 Thumbs.db
-
-# TypeScript and Vite caches
-*.tsbuildinfo
-.vite/
