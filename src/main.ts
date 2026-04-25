@@ -74,6 +74,7 @@ const HOLD_TO_FREEZE_MS = 1000;
 const EXTENDED_THRESHOLD = 0.05;
 const DEDUPE_DISTANCE = 18;
 const POLYGON_STABILITY_TOLERANCE = 22;
+const READY_STATUS_AUTOHIDE_MS = 2500;
 
 const style: VisualStyle = {
   coreColor: '#f7feff',
@@ -120,6 +121,7 @@ let previewHoldPolygon: Point[] = [];
 let isFrozen = false;
 let stream: MediaStream | null = null;
 let latestLivePolygon: Point[] = [];
+let statusHideTimeoutId: number | null = null;
 const captureState: CaptureState = {
   delaySeconds: 0,
   countdownEndAt: null,
@@ -129,6 +131,7 @@ const captureState: CaptureState = {
 
 applyStyleToDocument();
 attachUIEvents();
+syncActionButtons();
 startApp().catch((error: unknown) => {
   console.error(error);
   setStatus('Không thể khởi động camera hoặc MediaPipe. Hãy cấp quyền camera rồi tải lại trang.');
@@ -388,7 +391,7 @@ function updateFreezeState(livePolygon: Point[], handCount: number): void {
   isFrozen = true;
   holdStartAt = null;
   previewHoldPolygon = [];
-  captureBtn.classList.remove('hidden');
+  syncActionButtons();
   setStatus('Portal đã freeze. Chọn thời gian chờ rồi bấm Chụp ảnh.');
 }
 
@@ -847,11 +850,29 @@ function resetPortal(): void {
   captureState.capturedImageDataUrl = null;
   captureState.previewOpen = false;
   frozenBackgroundCtx.clearRect(0, 0, frozenBackgroundCanvas.width, frozenBackgroundCanvas.height);
-  captureBtn.classList.add('hidden');
+  syncActionButtons();
   closePreviewModal();
   setStatus('Đã reset toàn bộ. Đưa tay vào • Mở lòng bàn tay • Giữ 1 giây để tạo khung');
 }
 
 function setStatus(message: string): void {
+  if (statusHideTimeoutId !== null) {
+    window.clearTimeout(statusHideTimeoutId);
+    statusHideTimeoutId = null;
+  }
+
   statusText.textContent = message;
+  statusText.classList.remove('status-hidden');
+
+  if (message.startsWith('Sẵn sàng.')) {
+    statusHideTimeoutId = window.setTimeout(() => {
+      statusText.classList.add('status-hidden');
+      statusHideTimeoutId = null;
+    }, READY_STATUS_AUTOHIDE_MS);
+  }
+}
+
+function syncActionButtons(): void {
+  captureBtn.classList.toggle('hidden', !isFrozen);
+  resetBtn.classList.toggle('hidden', !isFrozen);
 }
