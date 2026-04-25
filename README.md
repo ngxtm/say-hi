@@ -90,6 +90,8 @@ npm run preview
 
 This project is a static frontend application, so the recommended production setup is a Docker multi-stage build that compiles the app with Node.js and serves the final `dist/` output through Nginx.
 
+Auto deploy smoke test: this line is intentionally safe to change when validating Dokploy watch path triggers.
+
 ### Dokploy Deployment
 
 Recommended target:
