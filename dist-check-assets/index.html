@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Hand Frame Portal</title>
+    <meta
+      name="description"
+      content="Portal khung tay realtime bằng MediaPipe Hand Landmarker và Canvas 2D."
+    />
+    <script type="module" crossorigin src="/assets/index-COOySAhJ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CPUMgvEZ.css">
+  </head>
+  <body>
+    <canvas id="app-canvas"></canvas>
+
+    <div class="hud">
+      <div class="brand">Hand Frame Portal</div>
+      <div class="headline">Đưa tay vào • Mở lòng bàn tay • Giữ 1 giây để tạo khung</div>
+      <div id="status-text" class="status">Đang khởi tạo camera và MediaPipe...</div>
+
+      <div class="controls">
+        <label class="theme-picker">
+          <span>Theme</span>
+          <select id="theme-select"></select>
+        </label>
+
+        <label class="theme-picker capture-picker">
+          <span>Hẹn giờ</span>
+          <select id="capture-delay-select">
+            <option value="0">Chụp ngay</option>
+            <option value="3">3 giây</option>
+            <option value="5">5 giây</option>
+            <option value="10">10 giây</option>
+          </select>
+        </label>
+
+        <button id="capture-btn" class="action-btn hidden" type="button">📸 Chụp ảnh</button>
+
+        <button id="reset-btn" class="action-btn secondary" type="button">Reset</button>
+      </div>
+
+      <div class="footer-note">
+        Sau khi freeze: chọn thời gian chờ • bấm Chụp ảnh • xem preview rồi mới tải ảnh
+      </div>
+    </div>
+
+    <div id="preview-modal" class="preview-modal hidden" aria-hidden="true">
+      <div class="preview-backdrop"></div>
+      <div class="preview-dialog" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+        <div class="preview-header">
+          <div>
+            <div id="preview-title" class="preview-title">Ảnh vừa chụp</div>
+            <div class="preview-subtitle">Kiểm tra lại trước khi tải về máy</div>
+          </div>
+          <button id="close-preview-btn" class="action-btn secondary" type="button">Đóng</button>
+        </div>
+
+        <div class="preview-body">
+          <img id="preview-image" alt="Ảnh preview vừa chụp" />
+        </div>
+
+        <div class="preview-actions">
+          <button id="save-preview-btn" class="action-btn" type="button">📥 Tải ảnh</button>
+        </div>
+      </div>
+    </div>
+
+  </body>
+</html>
