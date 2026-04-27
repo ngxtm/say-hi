@@ -40,6 +40,13 @@ type CaptureState = {
   previewOpen: boolean;
 };
 
+type FingerCandidate = {
+  tipIndex: number;
+  outerJointIndex: number;
+  middleJointIndex: number;
+  baseJointIndex: number;
+};
+
 const HAND_CONNECTIONS: Array<[number, number]> = [
   [0, 1],
   [1, 2],
@@ -64,17 +71,26 @@ const HAND_CONNECTIONS: Array<[number, number]> = [
   [19, 20],
 ];
 
-const THUMB_TIP_INDEX = 4;
-const THUMB_IP_INDEX = 3;
-const THUMB_MCP_INDEX = 2;
-const WRIST_INDEX = 0;
-const OTHER_FINGERTIP_INDICES = [8, 12, 16, 20] as const;
-const OTHER_PIP_INDICES = [6, 10, 14, 18] as const;
 const HOLD_TO_FREEZE_MS = 1000;
-const EXTENDED_THRESHOLD = 0.05;
 const DEDUPE_DISTANCE = 18;
 const POLYGON_STABILITY_TOLERANCE = 22;
 const READY_STATUS_AUTOHIDE_MS = 2500;
+const PALM_CENTER_INDICES = [0, 5, 9, 13, 17] as const;
+const FINGER_CANDIDATES: FingerCandidate[] = [
+  { tipIndex: 4, outerJointIndex: 3, middleJointIndex: 2, baseJointIndex: 1 },
+  { tipIndex: 8, outerJointIndex: 7, middleJointIndex: 6, baseJointIndex: 5 },
+  { tipIndex: 12, outerJointIndex: 11, middleJointIndex: 10, baseJointIndex: 9 },
+  { tipIndex: 16, outerJointIndex: 15, middleJointIndex: 14, baseJointIndex: 13 },
+  { tipIndex: 20, outerJointIndex: 19, middleJointIndex: 18, baseJointIndex: 17 },
+];
+const FINGER_EXTENSION_RATIO = 1.16;
+const FINGERTIP_OUTWARD_MARGIN_RATIO = 0.12;
+const JOINT_OUTWARD_MARGIN_RATIO = 0.025;
+const JOINT_BACKTRACK_TOLERANCE_RATIO = 0.03;
+const MIN_FINGER_LENGTH_RATIO = 0.78;
+const FINGER_STRAIGHTNESS_COSINE = 0.22;
+const HULL_EPSILON = 0.0001;
+const RECTANGLE_ANGLE_COSINE_TOLERANCE = 0.38;
 
 const style: VisualStyle = {
   coreColor: '#f7feff',
@@ -217,7 +233,9 @@ async function startApp(): Promise<void> {
   setStatus('Đang tải MediaPipe Hand Landmarker...');
   await setupHandLandmarker();
 
-  setStatus('Sẵn sàng. Đưa tay vào • Mở lòng bàn tay • Giữ 1 giây để tạo khung');
+  setStatus(
+    'Sẵn sàng. Đưa các đầu ngón muốn làm đỉnh vào khung • Giữ 1 giây để tạo khung',
+  );
   requestAnimationFrame(renderLoop);
 }
 
@@ -281,6 +299,14 @@ function renderLoop(): void {
     return;
   }
 
+  if (isFrozen) {
+    latestLivePolygon = [];
+    drawFrame(latestLivePolygon, [], 0, getCountdownRemaining());
+    updateCountdownState();
+    requestAnimationFrame(renderLoop);
+    return;
+  }
+
   const now = performance.now();
   const currentVideoTime = video.currentTime;
 
@@ -305,54 +331,101 @@ function buildPolygonFromHands(landmarks: NormalizedLandmark[][]): Point[] {
   const points: Point[] = [];
 
   for (const hand of landmarks) {
-    if (isThumbExtended(hand)) {
-      const thumbTip = hand[THUMB_TIP_INDEX];
-      if (thumbTip) {
-        points.push(toCanvasPoint(thumbTip.x, thumbTip.y));
-      }
-    }
-
-    for (let index = 0; index < OTHER_FINGERTIP_INDICES.length; index += 1) {
-      const tipIndex = OTHER_FINGERTIP_INDICES[index];
-      const pipIndex = OTHER_PIP_INDICES[index];
-      const tip = hand[tipIndex];
-      const pip = hand[pipIndex];
-
-      if (!tip || !pip) {
-        continue;
-      }
-
-      if (tip.y < pip.y - EXTENDED_THRESHOLD) {
-        points.push(toCanvasPoint(tip.x, tip.y));
-      }
-    }
+    points.push(...getExtendedFingertipPoints(hand));
   }
 
   const dedupedPoints = dedupeNearbyPoints(points, DEDUPE_DISTANCE);
-  return sortPointsClockwise(dedupedPoints);
+  return buildConvexHull(dedupedPoints);
 }
 
-function isThumbExtended(hand: NormalizedLandmark[]): boolean {
-  const thumbTip = hand[THUMB_TIP_INDEX];
-  const thumbIp = hand[THUMB_IP_INDEX];
-  const thumbMcp = hand[THUMB_MCP_INDEX];
-  const wrist = hand[WRIST_INDEX];
+function getExtendedFingertipPoints(hand: NormalizedLandmark[]): Point[] {
+  const palmCenter = getPalmCenter(hand);
+  if (!palmCenter) {
+    return [];
+  }
 
-  if (!thumbTip || !thumbIp || !thumbMcp || !wrist) {
+  const palmScale = getPalmScale(hand, palmCenter);
+  const points: Point[] = [];
+
+  for (const finger of FINGER_CANDIDATES) {
+    const tip = hand[finger.tipIndex];
+    if (tip && isFingerExtended(hand, finger, palmCenter, palmScale)) {
+      points.push(toCanvasPoint(tip.x, tip.y));
+    }
+  }
+
+  return points;
+}
+
+function isFingerExtended(
+  hand: NormalizedLandmark[],
+  finger: FingerCandidate,
+  palmCenter: NormalizedLandmark,
+  palmScale: number,
+): boolean {
+  const tip = hand[finger.tipIndex];
+  const outerJoint = hand[finger.outerJointIndex];
+  const middleJoint = hand[finger.middleJointIndex];
+  const baseJoint = hand[finger.baseJointIndex];
+
+  if (!tip || !outerJoint || !middleJoint || !baseJoint) {
     return false;
   }
 
-  const tipToMcp = normalizedDistance(thumbTip, thumbMcp);
-  const tipToWrist = normalizedDistance(thumbTip, wrist);
-  const ipToWrist = normalizedDistance(thumbIp, wrist);
-  const spreadFromPalm = Math.abs(thumbTip.x - thumbMcp.x);
+  const tipToBase = normalizedDistance(tip, baseJoint);
+  const outerJointToBase = normalizedDistance(outerJoint, baseJoint);
+  const tipToPalm = normalizedDistance(tip, palmCenter);
+  const outerJointToPalm = normalizedDistance(outerJoint, palmCenter);
+  const middleJointToPalm = normalizedDistance(middleJoint, palmCenter);
+  const baseJointToPalm = normalizedDistance(baseJoint, palmCenter);
 
-  return tipToMcp > 0.12 && tipToWrist > ipToWrist * 0.95 && spreadFromPalm > 0.05;
+  const hasVisibleLength = tipToBase >= palmScale * MIN_FINGER_LENGTH_RATIO;
+  const opensFromBase = tipToBase >= outerJointToBase * FINGER_EXTENSION_RATIO;
+  const jointsOpenOutward =
+    middleJointToPalm >= baseJointToPalm - palmScale * JOINT_BACKTRACK_TOLERANCE_RATIO &&
+    outerJointToPalm >= middleJointToPalm + palmScale * JOINT_OUTWARD_MARGIN_RATIO &&
+    tipToPalm >= outerJointToPalm + palmScale * FINGERTIP_OUTWARD_MARGIN_RATIO;
+  const fingertipKeepsDirection =
+    directionCosine(middleJoint, outerJoint, outerJoint, tip) >= FINGER_STRAIGHTNESS_COSINE;
+
+  return hasVisibleLength && opensFromBase && jointsOpenOutward && fingertipKeepsDirection;
+}
+
+function getPalmCenter(hand: NormalizedLandmark[]): NormalizedLandmark | null {
+  const palmPoints = PALM_CENTER_INDICES.map((index) => hand[index]);
+
+  if (palmPoints.some((point) => !point)) {
+    return null;
+  }
+
+  const center = palmPoints.reduce<NormalizedLandmark>(
+    (accumulator, point) => ({
+      x: accumulator.x + point.x,
+      y: accumulator.y + point.y,
+      z: accumulator.z + point.z,
+    }),
+    { x: 0, y: 0, z: 0 },
+  );
+
+  return {
+    x: center.x / palmPoints.length,
+    y: center.y / palmPoints.length,
+    z: center.z / palmPoints.length,
+  };
+}
+
+function getPalmScale(hand: NormalizedLandmark[], palmCenter: NormalizedLandmark): number {
+  const distances = PALM_CENTER_INDICES.map((index) => hand[index])
+    .filter((point): point is NormalizedLandmark => Boolean(point))
+    .map((point) => normalizedDistance(point, palmCenter));
+
+  return Math.max(0.08, ...distances);
 }
 
 function updateFreezeState(livePolygon: Point[], handCount: number): void {
   const hasEnoughPoints = livePolygon.length >= 3;
   const now = Date.now();
+  const shapeName = getPolygonShapeName(livePolygon);
 
   if (isFrozen) {
     return;
@@ -361,38 +434,43 @@ function updateFreezeState(livePolygon: Point[], handCount: number): void {
   if (!hasEnoughPoints) {
     holdStartAt = null;
     previewHoldPolygon = [];
-    setStatus(`Đang thấy ${handCount} tay • ${livePolygon.length} đỉnh hợp lệ. Cần ít nhất 3 đỉnh để tạo khung.`);
+    setStatus(
+      `Đang thấy ${handCount} tay • ${livePolygon.length} đỉnh hợp lệ. Cần ít nhất 3 đỉnh để tạo tam giác trở lên.`,
+    );
     return;
   }
 
   if (holdStartAt === null) {
     holdStartAt = now;
     previewHoldPolygon = livePolygon.map((point) => ({ ...point }));
-    setStatus(`Đang thấy ${handCount} tay • ${livePolygon.length} đỉnh. Giữ yên thêm 1 giây để freeze background.`);
+    setStatus(
+      `Đang thấy ${handCount} tay • nhận diện ${shapeName}. Giữ yên thêm 1 giây để freeze background.`,
+    );
     return;
   }
 
   if (!isPolygonStable(previewHoldPolygon, livePolygon)) {
     holdStartAt = now;
     previewHoldPolygon = livePolygon.map((point) => ({ ...point }));
-    setStatus(`Khung đang đổi hình. Đã reset tiến trình • ${handCount} tay • ${livePolygon.length} đỉnh.`);
+    setStatus(`Khung đang đổi hình. Đã reset tiến trình • ${handCount} tay • ${shapeName}.`);
     return;
   }
 
   const elapsed = now - holdStartAt;
   if (elapsed < HOLD_TO_FREEZE_MS) {
     const remain = ((HOLD_TO_FREEZE_MS - elapsed) / 1000).toFixed(1);
-    setStatus(`Đang thấy ${handCount} tay • ${livePolygon.length} đỉnh • giữ yên thêm ${remain}s để tạo portal.`);
+    setStatus(`Đang thấy ${handCount} tay • ${shapeName} • giữ yên thêm ${remain}s để tạo portal.`);
     return;
   }
 
   portalPolygon = livePolygon.map((point) => ({ ...point }));
   captureFrozenBackground();
   isFrozen = true;
+  lastDetections = null;
   holdStartAt = null;
   previewHoldPolygon = [];
   syncActionButtons();
-  setStatus('Portal đã freeze. Chọn thời gian chờ rồi bấm Chụp ảnh.');
+  setStatus(`Portal ${shapeName} đã freeze. Chọn thời gian chờ rồi bấm Chụp ảnh.`);
 }
 
 function startCaptureFlow(): void {
@@ -715,8 +793,25 @@ function toCanvasPoint(normalizedX: number, normalizedY: number): Point {
 function normalizedDistance(pointA: NormalizedLandmark, pointB: NormalizedLandmark): number {
   const deltaX = pointA.x - pointB.x;
   const deltaY = pointA.y - pointB.y;
-  const deltaZ = pointA.z - pointB.z;
-  return Math.hypot(deltaX, deltaY, deltaZ);
+  return Math.hypot(deltaX, deltaY);
+}
+
+function directionCosine(
+  startA: NormalizedLandmark,
+  endA: NormalizedLandmark,
+  startB: NormalizedLandmark,
+  endB: NormalizedLandmark,
+): number {
+  const vectorA = { x: endA.x - startA.x, y: endA.y - startA.y };
+  const vectorB = { x: endB.x - startB.x, y: endB.y - startB.y };
+  const lengthA = Math.hypot(vectorA.x, vectorA.y);
+  const lengthB = Math.hypot(vectorB.x, vectorB.y);
+
+  if (lengthA === 0 || lengthB === 0) {
+    return -1;
+  }
+
+  return dotProduct(vectorA, vectorB) / (lengthA * lengthB);
 }
 
 function dedupeNearbyPoints(points: Point[], minDistance: number): Point[] {
@@ -732,17 +827,96 @@ function dedupeNearbyPoints(points: Point[], minDistance: number): Point[] {
   return result;
 }
 
-function sortPointsClockwise(points: Point[]): Point[] {
-  if (points.length <= 2) {
+function buildConvexHull(points: Point[]): Point[] {
+  if (points.length <= 1) {
     return points;
   }
 
-  const center = getPolygonCenter(points);
+  const sortedPoints = [...points].sort(
+    (pointA, pointB) => pointA.x - pointB.x || pointA.y - pointB.y,
+  );
+  const lowerHull: Point[] = [];
 
-  return [...points].sort((pointA, pointB) => {
-    const angleA = Math.atan2(pointA.y - center.y, pointA.x - center.x);
-    const angleB = Math.atan2(pointB.y - center.y, pointB.x - center.x);
-    return angleA - angleB;
+  for (const point of sortedPoints) {
+    while (
+      lowerHull.length >= 2 &&
+      crossProduct(
+        lowerHull[lowerHull.length - 2],
+        lowerHull[lowerHull.length - 1],
+        point,
+      ) <= HULL_EPSILON
+    ) {
+      lowerHull.pop();
+    }
+
+    lowerHull.push(point);
+  }
+
+  const upperHull: Point[] = [];
+
+  for (let index = sortedPoints.length - 1; index >= 0; index -= 1) {
+    const point = sortedPoints[index];
+
+    while (
+      upperHull.length >= 2 &&
+      crossProduct(
+        upperHull[upperHull.length - 2],
+        upperHull[upperHull.length - 1],
+        point,
+      ) <= HULL_EPSILON
+    ) {
+      upperHull.pop();
+    }
+
+    upperHull.push(point);
+  }
+
+  return lowerHull.slice(0, -1).concat(upperHull.slice(0, -1));
+}
+
+function getPolygonShapeName(polygon: Point[]): string {
+  switch (polygon.length) {
+    case 3:
+      return 'tam giác';
+    case 4:
+      return isRectangleLike(polygon) ? 'hình chữ nhật' : 'tứ giác';
+    case 5:
+      return 'ngũ giác';
+    case 6:
+      return 'lục giác';
+    case 7:
+      return 'thất giác';
+    case 8:
+      return 'bát giác';
+    default:
+      return `đa giác ${polygon.length} đỉnh`;
+  }
+}
+
+function isRectangleLike(polygon: Point[]): boolean {
+  if (polygon.length !== 4) {
+    return false;
+  }
+
+  const area = Math.abs(getPolygonArea(polygon));
+  if (area < 1200) {
+    return false;
+  }
+
+  return polygon.every((current, index) => {
+    const previous = polygon[(index + polygon.length - 1) % polygon.length];
+    const next = polygon[(index + 1) % polygon.length];
+    const vectorA = { x: previous.x - current.x, y: previous.y - current.y };
+    const vectorB = { x: next.x - current.x, y: next.y - current.y };
+    const lengthA = Math.hypot(vectorA.x, vectorA.y);
+    const lengthB = Math.hypot(vectorB.x, vectorB.y);
+
+    if (lengthA < 24 || lengthB < 24) {
+      return false;
+    }
+
+    const cornerCosine = Math.abs(dotProduct(vectorA, vectorB) / (lengthA * lengthB));
+    return cornerCosine <= RECTANGLE_ANGLE_COSINE_TOLERANCE;
   });
 }
 
@@ -767,9 +941,29 @@ function isPolygonStable(previousPolygon: Point[], nextPolygon: Point[]): boolea
     return false;
   }
 
-  return previousPolygon.every(
-    (point, index) => distance(point, nextPolygon[index]) <= POLYGON_STABILITY_TOLERANCE,
+  if (previousPolygon.length === 0) {
+    return true;
+  }
+
+  return (
+    isPolygonSequenceStable(previousPolygon, nextPolygon) ||
+    isPolygonSequenceStable(previousPolygon, [...nextPolygon].reverse())
   );
+}
+
+function isPolygonSequenceStable(previousPolygon: Point[], nextPolygon: Point[]): boolean {
+  for (let offset = 0; offset < nextPolygon.length; offset += 1) {
+    const stableAtOffset = previousPolygon.every((point, index) => {
+      const nextPoint = nextPolygon[(index + offset) % nextPolygon.length];
+      return distance(point, nextPoint) <= POLYGON_STABILITY_TOLERANCE;
+    });
+
+    if (stableAtOffset) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getTopEdge(polygon: Point[]): { start: Point; end: Point } | null {
@@ -800,6 +994,13 @@ function distance(pointA: Point, pointB: Point): number {
   return Math.hypot(deltaX, deltaY);
 }
 
+function crossProduct(origin: Point, pointA: Point, pointB: Point): number {
+  return (
+    (pointA.x - origin.x) * (pointB.y - origin.y) -
+    (pointA.y - origin.y) * (pointB.x - origin.x)
+  );
+}
+
 function getPolygonCenter(points: Point[]): Point {
   return points.reduce(
     (accumulator, point) => ({
@@ -812,6 +1013,15 @@ function getPolygonCenter(points: Point[]): Point {
 
 function dotProduct(pointA: Point, pointB: Point): number {
   return pointA.x * pointB.x + pointA.y * pointB.y;
+}
+
+function getPolygonArea(polygon: Point[]): number {
+  return (
+    polygon.reduce((area, point, index) => {
+      const nextPoint = polygon[(index + 1) % polygon.length];
+      return area + point.x * nextPoint.y - nextPoint.x * point.y;
+    }, 0) / 2
+  );
 }
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -852,7 +1062,9 @@ function resetPortal(): void {
   frozenBackgroundCtx.clearRect(0, 0, frozenBackgroundCanvas.width, frozenBackgroundCanvas.height);
   syncActionButtons();
   closePreviewModal();
-  setStatus('Đã reset toàn bộ. Đưa tay vào • Mở lòng bàn tay • Giữ 1 giây để tạo khung');
+  setStatus(
+    'Đã reset toàn bộ. Đưa các đầu ngón muốn làm đỉnh vào khung • Giữ 1 giây để tạo khung',
+  );
 }
 
 function setStatus(message: string): void {
